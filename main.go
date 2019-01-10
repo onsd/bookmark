@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
+	jwt "github.com/dgrijalva/jwt-go"
 	_ "github.com/mattn/go-sqlite3"
 	gorp "gopkg.in/gorp.v1"
 
@@ -39,13 +41,18 @@ func main() {
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 
-	//Login route
-	//e.POST("/login", login)
 	//Authorized route
 	e.POST("/auth", auth)
+	//Login route
+	e.POST("/login", login)
 
 	//Unauthenticated route
 	e.GET("/", accessible)
+
+	// Restricted group
+	r := e.Group("/restricted")
+	r.Use(middleware.JWT([]byte(os.Getenv("SECRETKEY"))))
+	r.GET("", restricted)
 
 	// initialize the DbMap
 	dbmap := initDB()
@@ -113,9 +120,52 @@ func auth(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, res)
 }
+func login(c echo.Context) error {
+	dbmap := initDB()
+	defer dbmap.Db.Close()
 
+	username := c.FormValue("username")
+	password := c.FormValue("password")
+
+	count, err := dbmap.SelectInt("select count(*) from users where username=? and password=?", username, password)
+	checkErr(err, "select count(*) failed")
+	user := NewUser(username, password)
+	if count == 0 {
+		//already registerd or same username
+		res := &Response{
+			Status:  "Not registrated",
+			Content: user,
+		}
+		return c.JSON(http.StatusUnauthorized, res)
+	}
+
+	//Create token
+	token := jwt.New(jwt.SigningMethodHS256)
+
+	// Set claims
+	claims := token.Claims.(jwt.MapClaims)
+	claims["name"] = username
+	claims["password"] = password
+	claims["exp"] = time.Now().Add(time.Hour * 72).Unix()
+	t, err := token.SignedString([]byte(os.Getenv("SECRETKEY")))
+	if err != nil {
+		checkErr(err, "token sign error")
+	}
+	res := &Response{
+		Status:  "authorized",
+		Content: t,
+	}
+	return c.JSON(http.StatusOK, res)
+}
 func accessible(c echo.Context) error {
 	return c.String(http.StatusOK, "Accessible")
+}
+func restricted(c echo.Context) error {
+	user := c.Get("user").(*jwt.Token)
+	claims := user.Claims.(jwt.MapClaims)
+	name := claims["name"].(string)
+	password := claims["password"].(string)
+	return c.String(http.StatusOK, "Welcome "+name+"!"+"\nYour password is "+password)
 }
 
 // NewBookmark returns the Bookmark struct with URL, Description and present time
